@@ -94,17 +94,18 @@ def fit_muon(x, y, image, geom, tailcuts):
     # Do an iterative fit removing pixels which are beyond 0.4*ring_radius of the ring (along the radial direction):
     # The goal is to improve fit for good rings with very few additional non-ring bright pixels.
 
-    for _ in [0]*2:  # just to iterate the fit twice more
+    for _ in range(2):  # just to iterate the fit twice more
         dist = np.sqrt(np.power(x - muonringparam.ring_center_x, 2)
                        + np.power(y - muonringparam.ring_center_y, 2))
         ring_dist = np.abs(dist - muonringparam.ring_radius)
         muonringparam = muonring.fit(
         x, y, image_clean * (ring_dist < muonringparam.ring_radius * 0.4)
         )
-    
+
     return muonringparam, clean_mask, dist, image_clean
 
-def analyze_muon_event(event_id, image, geom, equivalent_focal_length, 
+
+def analyze_muon_event(event_id, image, geom, equivalent_focal_length,
                        mirror_area, plot_rings, plots_path):
     """
     Analyze an event to fit a muon ring
@@ -143,7 +144,7 @@ def analyze_muon_event(event_id, image, geom, equivalent_focal_length,
     max_impact_parameter = 0.9                 # in fraction of mirror radius
     ring_integration_width = 0.25              # +/- integration range along ring radius, in fraction of ring radius (was 0.4 until 20200326)
     outer_ring_width = 0.2                     # in fraction of ring radius, width of ring just outside the integrated muon ring, used to check pedestal bias
-    
+
     x, y = get_muon_center(geom, equivalent_focal_length)
     muonringparam, clean_mask, dist, image_clean = fit_muon(x, y, image, geom, tailcuts)
 
@@ -166,14 +167,14 @@ def analyze_muon_event(event_id, image, geom, equivalent_focal_length,
             muonringparam.ring_center_x,
             muonringparam.ring_center_y)
 
-    
+
     radial_distribution = radial_light_distribution(
         muonringparam.ring_center_x,
         muonringparam.ring_center_y,
         x[clean_mask], y[clean_mask],
         image[clean_mask])
-    
-    
+
+
     # Do complicated calculations (minuit-based max likelihood ring fit) only for selected rings:
     candidate_clean_ring = all(
         [radial_distribution['standard_dev'] < max_radial_stdev,
@@ -244,10 +245,10 @@ def analyze_muon_event(event_id, image, geom, equivalent_focal_length,
     # Now add the conditions based on the detailed muon ring fit made by MuonLineIntegrate:
     conditions = [
         candidate_clean_ring,
-        
+
         muonintensityoutput.impact_parameter <
         max_impact_parameter * mirror_radius,
-        
+
         muonintensityoutput.impact_parameter >
         min_impact_parameter * mirror_radius, 
 
@@ -256,12 +257,12 @@ def analyze_muon_event(event_id, image, geom, equivalent_focal_length,
         # < 0.08,
         # NOTE: inside "candidate_clean_ring" cuts there is already a cut in the st dev of light distribution along ring radius,
         # which is also a measure of the ring width
-        
+
         # muonintensityoutput.ring_width
         # > 0.04
     ]
 
-    muonintensityparam = muonintensityoutput 
+    muonintensityparam = muonintensityoutput
     if all(conditions):
         good_ring = True
     else:
@@ -297,13 +298,14 @@ def analyze_muon_event(event_id, image, geom, equivalent_focal_length,
         plt.figtext(0.15, 0.16, 'fitted ring width: {0:.3f}'.format(width))
         plt.figtext(0.15, 0.14, 'ring completeness: {0:.3f}'.format(muonintensityoutput.ring_completeness))
 
-        
+
         fig.savefig('{}/Event_{}_fitted.png'.format(plots_path, event_id))
 
     if(plot_rings and not plots_path):
         print("You are trying to plot without giving a path!")
 
     return muonintensityparam, size_outside_ring, muonringparam, good_ring, radial_distribution, mean_pixel_charge_around_ring
+
 
 def muon_filter(image, thr_low = 0, thr_up = 1.e10):
     """
@@ -322,6 +324,7 @@ def muon_filter(image, thr_low = 0, thr_up = 1.e10):
 
     """
     return image.sum() > thr_low and image.sum() < thr_up
+
 
 def tag_pix_thr(image, thr_low = 50, thr_up = 500, pe_thr = 10):
     """
@@ -365,28 +368,35 @@ def radial_light_distribution(centre_x, centre_y, pixel_x, pixel_y, image):
     standard_dev, skewness
     """
     # Convert everything to degrees:
-    x0 = centre_x.to(u.deg).value
-    y0 = centre_y.to(u.deg).value
-    pix_x = pixel_x.to(u.deg).value
-    pix_y = pixel_y.to(u.deg).value
+    x0 = centre_x.to_value(u.deg)
+    y0 = centre_y.to_value(u.deg)
+    pix_x = pixel_x.to_value(u.deg)
+    pix_y = pixel_y.to_value(u.deg)
 
-    pix_r = np.hypot(pix_x-x0, pix_y-y0)
+    pix_r = np.hypot(pix_x - x0, pix_y - y0)
 
     # mean, standard deviation & skewness of light distribution along ring radius.
-    # ring_radius calculated elsewhere is approximately equal to "mean", but not exactly, so we recalculate it here:
-    mean = np.sum(np.multiply(image,pix_r))/np.sum(image)
-    standard_dev = np.sqrt(np.sum(np.multiply(image,np.square(pix_r-mean)))/np.sum(image))
-    skewness =  np.sum(np.multiply(image,np.power((pix_r-mean)/standard_dev,3.)))/np.sum(image)
-    excess_kurtosis = np.sum(np.multiply(image,np.power((pix_r-mean)/standard_dev,4.)))/np.sum(image) - 3.
+    # ring_radius calculated elsewhere is approximately equal to "mean",
+    # but not exactly, so we recalculate it here:
+    mean = np.average(pix_r, weights=image)
+    delta_r = pix_r - mean
+    standard_dev = np.sqrt(np.average(delta_r**2, weights=image))
 
-#    plt.scatter(pix_r, image)
-#    plt.show()
-    
-    return {'standard_dev' : standard_dev*u.deg, 'skewness' : skewness, 'excess_kurtosis' : excess_kurtosis}
+    m3 = np.average(delta_r**3, weights=image)
+    skewness = m3 / standard_dev**3
+
+    m4 = np.average(delta_r**4, weights=image)
+    excess_kurtosis = m4 / standard_dev**4 - 3
+
+    return {
+        'mean': u.Quantity(mean, u.deg),
+        'standard_dev': u.Quantity(standard_dev, u.deg),
+        'skewness': skewness,
+        'excess_kurtosis': excess_kurtosis
+    }
 
 
 def create_muon_table():
-    
     return {'event_id': [],
             'event_time': [],
             'ring_size': [],
