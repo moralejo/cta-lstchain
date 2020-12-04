@@ -29,14 +29,11 @@ class DL1DataCheckContainer(Container):
     elapsed_time = Field(-1, 'Subrun time duration (from Dragon)')
     num_events = Field(-1, 'Total number of events')
     trigger_type = Field(None, 'Number of events per trigger type')
-    ucts_trigger_type = Field(None, 'Number of events per ucts trigger type')
     mean_alt_tel = Field(None, 'Mean telescope altitude')
     mean_az_tel = Field(None, 'Mean telescope azimuth')
 
     # sampled quantities, stored every few events:
     sampled_event_ids = Field(None, 'sampled event ids')
-    ucts_time = Field(None, 'ucts time', unit=u.s)
-    tib_time = Field(None, 'tib_time', unit=u.s)
     dragon_time = Field(None, 'dragon_time', unit=u.s)
 
     # histograms; they store arrays of counts. Binning is defined in class
@@ -114,13 +111,14 @@ class DL1DataCheckContainer(Container):
         # the elapsed time is between first and last event of the events in
         # table (we do not apply the mask here since we want to have all
         # events!)
-        self.elapsed_time = table['dragon_time'][len(table)-1] - \
-                            table['dragon_time'][0]
+        self.elapsed_time = (table['time'][len(table)-1] -
+                             table['time'][0])*86400
+
         self.num_events = mask.sum()
-        self.ucts_trigger_type = \
-            count_trig_types(table['ucts_trigger_type'][mask])
-        self.trigger_type = \
-            count_trig_types(table['trigger_type'][mask])
+        self.trigger_type = count_trig_types(table['event_type'][mask])
+        # the check above should now be ok by construction, since the mask is
+        # based on the same event_type values!
+
         self.mean_alt_tel = np.mean(table['alt_tel'])
         self.mean_az_tel = np.mean(table['az_tel'])
 
@@ -129,45 +127,39 @@ class DL1DataCheckContainer(Container):
         n_jump = 1+int(self.num_events/n_samples)
         # keep some info every n-jump-th event:
         sampled_event_ids = np.array(table['event_id'][mask][0::n_jump])
-        tib_time = u.Quantity(np.array(table['tib_time'][mask][0::n_jump]),
-                              u.s, copy=False)
-        ucts_time = u.Quantity(np.array(table['ucts_time'][mask][0::n_jump]),
-                               u.s, copy=False)
-        dragon_time = u.Quantity(np.array(table['dragon_time'][mask][
-                                          0::n_jump]), u.s, copy=False)
+        dragon_time = u.Quantity(np.array(table['time'][mask][0::n_jump]),
+                                 u.s, copy=False)
         # in case the resulting number of entries is <n_samples, we have to pad
         # the arrays, because hdf vector columns must have the same number of
         # elements in each row. We repeat the last value in the array
         padding = (0, n_samples-len(sampled_event_ids))
         self.sampled_event_ids = np.pad(sampled_event_ids, padding, mode='edge')
-        self.tib_time = np.pad(tib_time, padding, mode='edge')
-        self.ucts_time = np.pad(ucts_time, padding, mode='edge')
         self.dragon_time = np.pad(dragon_time, padding, mode='edge')
 
         # for the delta_t histogram we do not apply the mask, we want to have
         # all events present in the original table:
-        delta_t = np.array(table['dragon_time'][1:]) - \
-                  np.array(table['dragon_time'][:-1])
-        counts, _, _, = plt.hist(delta_t*1.e3,
-                                 bins=histogram_binnings.hist_delta_t)
+        delta_t = np.array(table['time'][1:]) - np.array(table['time'][:-1])
+        # days to milliseconds:
+        delta_t *= 8.64e7
+        counts, _, _, = plt.hist(delta_t, bins=histogram_binnings.hist_delta_t)
         self.hist_delta_t = counts
 
-        n_pixels = table['n_pixels'][mask]
+        n_pixels = table['morphology_num_pixels'][mask]
         counts, _, _, = plt.hist(n_pixels,
                                  bins=histogram_binnings.hist_npixels)
         self.hist_npixels = counts
 
-        n_islands = table['n_islands'][mask]
+        n_islands = table['morphology_num_islands'][mask]
         counts, _, _, = plt.hist(n_islands,
                                  bins=histogram_binnings.hist_nislands)
         self.hist_nislands = counts
 
-        intensity = table.loc[mask, 'intensity'].to_numpy()
+        intensity = table.loc[mask, 'hillas_intensity'].to_numpy()
         counts, _, _ = plt.hist(intensity,
                                 bins=histogram_binnings.hist_intensity)
         self.hist_intensity = counts
 
-        dist0 = table['r'][mask]
+        dist0 = table['hillas_r'][mask]
         counts, _, _ = plt.hist(dist0, bins=histogram_binnings.hist_dist0)
         self.hist_dist0 = counts
 
@@ -177,32 +169,35 @@ class DL1DataCheckContainer(Container):
         self.hist_dist0_intensity_gt_200 = counts
 
         counts, _, _, _ = plt.hist2d(intensity,
-                                     table.loc[mask, 'width'].to_numpy(),
+                                     table.loc[mask, 'hillas_width'].to_numpy(),
                                      bins=histogram_binnings.hist_width)
         self.hist_width = counts
 
         counts, _, _, _ = plt.hist2d(intensity,
-                                     table.loc[mask, 'length'].to_numpy(),
+                                     table.loc[mask,
+                                               'hillas_length'].to_numpy(),
                                      bins=histogram_binnings.hist_length)
         self.hist_length = counts
 
         counts, _, _, _ = plt.hist2d(intensity,
-                                     table.loc[mask, 'skewness'].to_numpy(),
+                                     table.loc[mask,
+                                               'hillas_skewness'].to_numpy(),
                                      bins=histogram_binnings.hist_skewness)
         self.hist_skewness = counts
 
-        psi = table.loc[mask, 'psi'].to_numpy()
+        psi = table.loc[mask, 'hillas_psi'].to_numpy()
         counts, _, _ = \
             plt.hist(psi, bins=histogram_binnings.hist_psi)
         self.hist_psi = counts
 
         counts, _, _, _ = \
-            plt.hist2d(intensity, table.loc[mask, 'intercept'].to_numpy(),
+            plt.hist2d(intensity, table.loc[mask,
+                                            'timing_intercept'].to_numpy(),
                        bins=histogram_binnings.hist_intercept)
         self.hist_intercept = counts
 
-        length = table.loc[mask, 'length'].to_numpy()
-        tgrad = np.abs(table.loc[mask, 'time_gradient'].to_numpy())
+        length = table.loc[mask, 'hillas_length'].to_numpy()
+        tgrad = np.abs(table.loc[mask, 'timing_slope'].to_numpy())
         counts, _, _, _ = \
             plt.hist2d(length, tgrad,
                        bins=histogram_binnings.hist_tgrad_vs_length)
@@ -218,8 +213,8 @@ class DL1DataCheckContainer(Container):
                        hist_tgrad_vs_length_intensity_gt_200)
         self.hist_tgrad_vs_length_intensity_gt_200 = counts
 
-        x = table['x'][mask]
-        y = table['y'][mask]
+        x = table['hillas_x'][mask]
+        y = table['hillas_y'][mask]
         # event-wise, id of camera pixel which contains the image's cog:
         cog_pixid = geom.position_to_pix_index(np.array(x)*u.m,
                                                np.array(y)*u.m)

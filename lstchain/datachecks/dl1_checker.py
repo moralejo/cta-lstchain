@@ -28,10 +28,10 @@ from ctapipe.coordinates import EngineeringCameraFrame
 from ctapipe.instrument import CameraGeometry
 from ctapipe.io import HDF5TableWriter
 from ctapipe.visualization import CameraDisplay
-from datetime import datetime
+from ctapipe.containers import EventType
+from astropy.time import Time
 from lstchain.datachecks.containers import DL1DataCheckContainer
 from lstchain.datachecks.containers import DL1DataCheckHistogramBins
-from lstchain.io.io import dl1_params_lstcam_key
 from lstchain.paths import parse_datacheck_dl1_filename, parse_dl1_filename, \
     run_to_muon_filename, run_to_datacheck_dl1_filename
 # from lstchain.visualization.bokeh import plot_mean_and_stddev_bokeh
@@ -89,33 +89,6 @@ def check_dl1(filenames, output_path, max_cores=4, create_pdf=False):
             logger.error(f'File {str(filename)} not found!')
             raise FileNotFoundError
 
-    # try to determine which trigger_type tag is more reliable for
-    # identifying interlaved pedestals. We check which one has
-    # more values == 32, which is the pedestal tag. The one called
-    # "trigger_type" seems to be the TIB trigger type. The fastest way to do
-    # this for the whole run seems to be using normal pytables:
-    trig_tags = {'trigger_type': [], 'ucts_trigger_type': []}
-    for filename in filenames:
-        with tables.open_file(filename,
-                              root_uep='/dl1/event/telescope/parameters') as f:
-            for name in trig_tags.keys():
-                trig_tags[name].extend(f.root.LST_LSTCam.col(name))
-    num_pedestals = {'trigger_type':
-                         (np.array(trig_tags['trigger_type']) == 32).sum(),
-                     'ucts_trigger_type':
-                         (np.array(trig_tags['ucts_trigger_type']) == 32).sum()}
-    logger.info(f'Number of == 32 (pedestal) trigger tags: {num_pedestals}')
-
-    # Choose what source to use for obtaining the trigger type:
-    trigger_source = 'ucts_trigger_type'
-
-    # Commented lines below, because the criterion of who has more "pedestal
-    # tags" (==32) does not seem reliable to indicate which source of the
-    # trigger type is more reliable:
-    #
-    # if num_pedestals['ucts_trigger_type'] > num_pedestals['trigger_type']:
-    #    trigger_source = 'ucts_trigger_type'
-
     # create container for the histograms' binnings, to be saved in the hdf5
     # output file:
     histogram_binning = DL1DataCheckHistogramBins()
@@ -123,7 +96,7 @@ def check_dl1(filenames, output_path, max_cores=4, create_pdf=False):
     # create the dl1_datacheck containers (one per subrun) for the three
     # event types, and add them to the list dl1datacheck:
     with Pool(max_cores) as pool:
-        func_args = [(filename, histogram_binning, trigger_source) for
+        func_args = [(filename, histogram_binning) for
                      filename in filenames]
         dl1datacheck = pool.starmap(process_dl1_file, func_args)
     # NOTE: the above does not seem to improve execution time on Mac OS X.
@@ -132,8 +105,7 @@ def check_dl1(filenames, output_path, max_cores=4, create_pdf=False):
     # or... process the files sequentially:
     # dl1datacheck = list([None]*len(filenames))
     # for i, filename in enumerate(filenames):
-    #     dl1datacheck[i] = process_dl1_file(filename, histogram_binning,
-    #     trigger_source)
+    #     dl1datacheck[i] = process_dl1_file(filename, histogram_binning)
 
     # NOTE: I do not think we may have memory problems, but if needed we could
     # write out the containers as they are produced.
@@ -157,7 +129,9 @@ def check_dl1(filenames, output_path, max_cores=4, create_pdf=False):
     # we assume that cam geom is the same in all files, & write the first one
     # we convert units from m to deg
     cam_description_table = \
-        Table.read(filenames[0], path='instrument/telescope/camera/LSTCam')
+        Table.read(filenames[0],
+                   path='configuration/instrument/telescope/camera'
+                        '/geometry_LSTCam')
     geom = CameraGeometry.from_table(cam_description_table)
     geom.to_table().write(datacheck_filename,
                           path=f'/instrument/telescope/camera/LSTCam',
@@ -165,8 +139,6 @@ def check_dl1(filenames, output_path, max_cores=4, create_pdf=False):
 
     # write out also which trigger tag has been used for finding pedestals:
     file = h5py.File(datacheck_filename, mode='a')
-    file.create_dataset('/dl1datacheck/used_trigger_tag', (1,), 'S32',
-                        [trigger_source.encode('ascii')])
     file.close()
 
     # do the plots and save them to a pdf file. We will look for the muons fits
@@ -179,14 +151,13 @@ def check_dl1(filenames, output_path, max_cores=4, create_pdf=False):
     return
 
 
-def process_dl1_file(filename, bins, trigger_source='trigger_type'):
+def process_dl1_file(filename, bins):
     """
 
     Parameters
     ----------
     filename: string, or Path, input DL1 .h5 file to be checked
     bins: DL1DataCheckHistogramBins container indicating binning of histograms
-    trigger_source: string, name of one of the trigger tags present in the
     DL1 file
 
     Returns
@@ -215,10 +186,12 @@ def process_dl1_file(filename, bins, trigger_source='trigger_type'):
     dl1datacheck_cosmics = DL1DataCheckContainer()
 
     cam_description_table = \
-        Table.read(filename, path='instrument/telescope/camera/LSTCam')
+        Table.read(filename,
+                   path='configuration/instrument/telescope/camera'
+                        '/geometry_LSTCam')
     geom = CameraGeometry.from_table(cam_description_table)
     optics_description_table = \
-        Table.read(filename, path='instrument/telescope/optics')
+        Table.read(filename, path='configuration/instrument/telescope/optics')
     equivalent_focal_length = \
         optics_description_table['equivalent_focal_length']
     m2deg = np.rad2deg(u.m/equivalent_focal_length*u.rad)/u.m
@@ -226,43 +199,45 @@ def process_dl1_file(filename, bins, trigger_source='trigger_type'):
     with tables.open_file(filename) as file:
         # unfortunately pandas.read_hdf does not seem compatible with
         # 'with... as...' statements
-        parameters = pd.read_hdf(filename, key=dl1_params_lstcam_key)
+        parameters = pd.read_hdf(filename,
+                                 key='/dl1/event/telescope/parameters/tel_001')
 
         # convert parameters from meters to degrees:
-        for var in ['r', 'width', 'length']:
+        for var in ['hillas_r', 'hillas_width', 'hillas_length']:
             parameters[var] *= m2deg
         # time gradient from ns/m to ns/deg
-        parameters['time_gradient'] /= m2deg
+        parameters['timing_slope'] /= m2deg
+        # We do not convert hillas_x,hillas_y (cog coordinates), because
+        # only in m can CameraGeometry find the pixel where a given cog falls
 
-        # We do not convert the x,y, cog coordinates, because only in m can
-        # CameraGeometry find the pixel where a given cog falls
-
-        # in order to read in the images we have to use tables,
-        # because pandas is not compatible with vector columns
-        image_table = file.root.dl1.event.telescope.image.LST_LSTCam
-
-        # create flatfield mask from the images table. For the time being,
-        # trigger type tags are not reliable. We first identify flatfield events
-        # by their looks.
-        image = image_table.col('image')
-        flatfield_mask = ((np.median(image, axis=1) >
-                           ff_min_pixel_charge_median) &
-                          (np.std(image, axis=1) <
-                           ff_max_pixel_charge_stddev))
-        # The same mask should be valid for image_table, since the entry in
-        # the two tables correspond one to one.
-
-        # then use trigger_source (name of one of the trigger tags in the DL1
-        # file) to try to identify pedestals on the parameters table (but we
-        # trust better the above empirical identification of flatfield events):
-        pedestal_mask = (parameters[trigger_source] == 32) & ~flatfield_mask
-
+        # get enet type tags:
+        event_type = file.root.dl1.event.subarray.trigger.col('event_type')
+        # see ctapipe.containers.EventType
+        flatfield_mask = (event_type == EventType.FLATFIELD.value)
+        # The same mask will be valid for images table and the parameters
+        # table, since the entries in the two tables correspond one to one.
+        pedestal_mask = (event_type == EventType.SKY_PEDESTAL.value)
         # Now obtain by exclusion the masks for cosmics:
         cosmics_mask = ~(pedestal_mask | flatfield_mask)
 
         logger.info(f'   pedestals: {np.sum(pedestal_mask)}, '
                     f' flatfield: {np.sum(flatfield_mask)}, '
                     f' cosmics: {np.sum(cosmics_mask)}')
+
+        # Now we add a timestamp column (in MJD) and an event type column:
+        parameters['time'] = file.root.dl1.event.subarray.trigger.col('time')
+        parameters['event_type'] = event_type
+        # Also telescope pointing:
+        parameters['alt_tel'] = \
+            file.root.dl1.monitoring.telescope.pointing.tel_001.col('altitude')
+        parameters['az_tel'] = \
+            file.root.dl1.monitoring.telescope.pointing.tel_001.col('azimuth')
+
+        # in order to read in the images we have to use tables,
+        # because pandas is not compatible with vector columns
+        image_table = file.root.dl1.event.telescope.images.tel_001
+
+        image = image_table.col('image')
 
         # Fill quantities which depend on event-wise (i.e. not
         # pixel-wise) parameters.
@@ -361,7 +336,6 @@ def plot_datacheck(datacheck_filename, out_path=None, muons_dir=None):
         # Read the binning of the stored histograms, and the info on
         # the source from which the trigger type info has been read:
         hist_binning = file.root.dl1datacheck.histogram_binning
-        trigger_source = file.root.dl1datacheck.used_trigger_tag[0].decode()
 
         group = file.root.dl1datacheck
         # get the tables for each type of events, check first in each case that
@@ -389,8 +363,7 @@ def plot_datacheck(datacheck_filename, out_path=None, muons_dir=None):
             raise RuntimeError
 
         dl1dcheck_tables = [table_flatfield, table_pedestals, table_cosmics]
-        labels = ['flatfield (guessed)', 'pedestals (from '+trigger_source+')',
-                  'cosmics']
+        labels = ['flatfield (guessed)', 'pedestals', 'cosmics']
         labels = [x for i, x in enumerate(labels)
                   if dl1dcheck_tables[i] is not None]
         dl1dcheck_tables = [x for x in dl1dcheck_tables if x is not None]
@@ -402,19 +375,8 @@ def plot_datacheck(datacheck_filename, out_path=None, muons_dir=None):
                  verticalalignment='center')
         plt.text(0.1, 0.6, 'First shower event UTC: ', fontsize=24,
                  horizontalalignment='left', verticalalignment='center')
-        plt.text(0.1, 0.5, '    UCTS: '+
-                 str(datetime.utcfromtimestamp\
-                         (table_cosmics.col('ucts_time')[0][0])),
-                 fontsize=24, horizontalalignment='left',
-                 verticalalignment='center')
-        plt.text(0.1, 0.43, '    Dragon: '+
-                 str(datetime.utcfromtimestamp\
-                         (table_cosmics.col('dragon_time')[0][0])),
-                 fontsize=24, horizontalalignment='left',
-                 verticalalignment='center')
-        plt.text(0.1, 0.36, '    TIB: '+
-                 str(datetime.utcfromtimestamp\
-                         (table_cosmics.col('tib_time')[0][0])),
+        plt.text(0.1, 0.52, '    Dragon time: '+
+                 Time(table_cosmics.col('dragon_time')[0][0], format='mjd').iso,
                  fontsize=24, horizontalalignment='left',
                  verticalalignment='center')
         axes.axis('off')
@@ -423,7 +385,6 @@ def plot_datacheck(datacheck_filename, out_path=None, muons_dir=None):
         fig, axes = plt.subplots(nrows=2, ncols=2, figsize=pagesize)
         fig.tight_layout(pad=3.0, h_pad=3.0, w_pad=2.0)
 
-        plot_trigger_types(dl1dcheck_tables, 'ucts_trigger_type', axes[0, 0])
         plot_trigger_types(dl1dcheck_tables, 'trigger_type', axes[0, 1])
 
         for table, label in zip(dl1dcheck_tables, labels):
@@ -454,7 +415,7 @@ def plot_datacheck(datacheck_filename, out_path=None, muons_dir=None):
         fig, axes = plt.subplots(nrows=2, ncols=2, figsize=pagesize)
         fig.tight_layout(pad=3.0, h_pad=3.0, w_pad=3.0)
 
-        for time_type in ['ucts_time', 'tib_time', 'dragon_time']:
+        for time_type in ['dragon_time']:
             axes[0, 0].plot(table_cosmics.col('sampled_event_ids').flatten(),
                             table_cosmics.col(time_type).flatten(),
                             label=time_type)
@@ -483,8 +444,9 @@ def plot_datacheck(datacheck_filename, out_path=None, muons_dir=None):
         # dragon_time contains for each table row a number of times sampled at
         # regular event intervals. We get the mean per row (typically =subrun):
         mean_dragon_time = np.mean(dragon_time, axis=1)
-        mpl_times = np.array([dates.date2num(datetime.utcfromtimestamp(x))
+        mpl_times = np.array([dates.date2num(Time(x, format='mjd').datetime)
                                              for x in mean_dragon_time])
+        
         axes[1, 1].plot_date(mpl_times, alt_deg, fmt=fmt, xdate=True,
                              tz='utc')
         axes[1, 1].set_xlabel('time (UTC)')
@@ -495,7 +457,7 @@ def plot_datacheck(datacheck_filename, out_path=None, muons_dir=None):
         fig, axes = plt.subplots(nrows=3, ncols=1, figsize=pagesize)
         fig.tight_layout(pad=3.0, h_pad=3.0, w_pad=3.0)
 
-        for i, time_type in enumerate(['ucts_time', 'tib_time', 'dragon_time']):
+        for i, time_type in enumerate(['dragon_time']):
             axes[i].plot(table_cosmics.col('sampled_event_ids').flatten(),
                          table_cosmics.col(time_type).flatten(),
                          label=time_type)
