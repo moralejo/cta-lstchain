@@ -420,7 +420,7 @@ def plot_datacheck(datacheck_filename, out_path=None, muons_dir=None):
                             table_cosmics.col(time_type).flatten(),
                             label=time_type)
         axes[0, 0].set_xlabel('event id')
-        axes[0, 0].set_ylabel('timestamp')
+        axes[0, 0].set_ylabel('timestamp (MJD)')
         axes[0, 0].legend(loc='best')
 
         hist = 'hist_delta_t'
@@ -446,7 +446,7 @@ def plot_datacheck(datacheck_filename, out_path=None, muons_dir=None):
         mean_dragon_time = np.mean(dragon_time, axis=1)
         mpl_times = np.array([dates.date2num(Time(x, format='mjd').datetime)
                                              for x in mean_dragon_time])
-        
+
         axes[1, 1].plot_date(mpl_times, alt_deg, fmt=fmt, xdate=True,
                              tz='utc')
         axes[1, 1].set_xlabel('time (UTC)')
